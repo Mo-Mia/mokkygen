@@ -12,6 +12,10 @@ export interface OpenRouterErrorDetails {
   message: string;
   code?: string | number;
   type?: string;
+  requestedModalities?: OpenRouterModality[];
+  fallbackModalities?: OpenRouterModality[];
+  fallbackUsed?: boolean;
+  originalErrorMessage?: string;
 }
 
 export class OpenRouterApiError extends Error {
@@ -72,6 +76,9 @@ export interface ORGenerationResult {
   providerName?: string;
   generationTime?: number;
   createdAt?: number;
+  requestedModalities?: OpenRouterModality[];
+  fallbackModalities?: OpenRouterModality[];
+  modalityFallbackUsed?: boolean;
 }
 
 export interface ORGenerationMetadata {
@@ -151,7 +158,7 @@ export function computeCreditDisplay(info: OpenRouterKeyInfo): CreditDisplay {
   };
 }
 
-async function parseErrorResponse(resp: Response, endpoint: string, model?: string): Promise<OpenRouterApiError> {
+async function parseErrorResponse(resp: Response, endpoint: string, model?: string, extra?: Partial<OpenRouterErrorDetails>): Promise<OpenRouterApiError> {
   const body = await resp.json().catch(() => null);
   const error = body?.error ?? body;
   const message = error?.message || `OpenRouter request failed (${resp.status})`;
@@ -163,12 +170,18 @@ async function parseErrorResponse(resp: Response, endpoint: string, model?: stri
     message,
     code: error?.code,
     type: error?.type,
+    ...extra,
   });
 }
 
 export function isGuardrailOrNoEndpointError(error: unknown): boolean {
   const message = error instanceof OpenRouterApiError ? error.details.message : error instanceof Error ? error.message : String(error);
   return /no endpoints available|guardrail|data policy|privacy|provider privacy|settings\/privacy/i.test(message);
+}
+
+function isModalityMismatchError(error: unknown): boolean {
+  const message = error instanceof OpenRouterApiError ? error.details.message : error instanceof Error ? error.message : String(error);
+  return /requested output modalities|support.*modalit|modalities:\s*image,\s*text/i.test(message);
 }
 
 export function technicalDetails(error: unknown): OpenRouterErrorDetails | undefined {
@@ -214,9 +227,14 @@ export function extractImageUrl(message: any, content: string): string | undefin
   return undefined;
 }
 
-export async function generateImage(apiKey: string, params: ORGenerationParams): Promise<ORGenerationResult> {
-  const endpoint = `${OR_BASE}/chat/completions`;
-  const startedAt = performance.now();
+async function requestImageCompletion(
+  apiKey: string,
+  endpoint: string,
+  params: ORGenerationParams,
+  modalities: OpenRouterModality[],
+  startedAt: number,
+  fallbackInfo?: { requestedModalities: OpenRouterModality[]; fallbackModalities: OpenRouterModality[] }
+): Promise<ORGenerationResult> {
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -228,13 +246,17 @@ export async function generateImage(apiKey: string, params: ORGenerationParams):
     body: JSON.stringify({
       model: params.model,
       messages: [{ role: 'user', content: params.prompt }],
-      modalities: params.modalities ?? DEFAULT_MODALITIES,
+      modalities,
       stream: false,
     }),
   });
 
   if (!resp.ok) {
-    throw await parseErrorResponse(resp, endpoint, params.model);
+    throw await parseErrorResponse(resp, endpoint, params.model, {
+      requestedModalities: fallbackInfo?.requestedModalities ?? modalities,
+      fallbackModalities: fallbackInfo?.fallbackModalities,
+      fallbackUsed: Boolean(fallbackInfo),
+    });
   }
 
   const data = await resp.json();
@@ -249,7 +271,44 @@ export async function generateImage(apiKey: string, params: ORGenerationParams):
     imageUrl,
     durationMs: Math.round(performance.now() - startedAt),
     createdAt: Date.now(),
+    requestedModalities: fallbackInfo?.requestedModalities ?? modalities,
+    fallbackModalities: fallbackInfo?.fallbackModalities,
+    modalityFallbackUsed: Boolean(fallbackInfo),
   };
+}
+
+export async function generateImage(apiKey: string, params: ORGenerationParams): Promise<ORGenerationResult> {
+  const endpoint = `${OR_BASE}/chat/completions`;
+  const startedAt = performance.now();
+  const requestedModalities = params.modalities ?? DEFAULT_MODALITIES;
+
+  try {
+    return await requestImageCompletion(apiKey, endpoint, params, requestedModalities, startedAt);
+  } catch (error) {
+    if (!isModalityMismatchError(error) || requestedModalities.length === 1 && requestedModalities[0] === 'image') {
+      if (error instanceof OpenRouterApiError) {
+        error.details.requestedModalities = requestedModalities;
+        error.details.fallbackUsed = false;
+      }
+      throw error;
+    }
+
+    const fallbackModalities: OpenRouterModality[] = ['image'];
+    try {
+      return await requestImageCompletion(apiKey, endpoint, params, fallbackModalities, startedAt, {
+        requestedModalities,
+        fallbackModalities,
+      });
+    } catch (fallbackError) {
+      if (fallbackError instanceof OpenRouterApiError) {
+        fallbackError.details.requestedModalities = requestedModalities;
+        fallbackError.details.fallbackModalities = fallbackModalities;
+        fallbackError.details.fallbackUsed = true;
+        fallbackError.details.originalErrorMessage = error instanceof OpenRouterApiError ? error.details.message : error instanceof Error ? error.message : String(error);
+      }
+      throw fallbackError;
+    }
+  }
 }
 
 export async function getGenerationMetadata(apiKey: string, generationId: string): Promise<ORGenerationMetadata | undefined> {

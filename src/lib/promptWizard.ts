@@ -1,8 +1,9 @@
 export const WIZARD_MODELS = [
-  { id: 'minimax/minimax-m2.5:free', label: 'MiniMax M2.5 (Default)' },
-  { id: 'openai/gpt-oss-120b:free', label: 'GPT-OSS 120B (Fallback)' },
-  { id: 'z-ai/glm-4.5-air:free', label: 'GLM 4.5 Air (Fast)' },
-  { id: 'nvidia/nemotron-3-super-120b-a12b:free', label: 'Nemotron 3 Super (Deep)' },
+  { id: 'z-ai/glm-4.5-air:free', label: 'GLM 4.5 Air (Free, Working)' },
+  { id: 'google/gemini-3-flash-preview', label: 'Gemini 3 Flash Preview (Fast, Paid)' },
+  { id: 'minimax/minimax-m2.5:free', label: 'MiniMax M2.5 (Free)' },
+  { id: 'openai/gpt-oss-120b:free', label: 'GPT-OSS 120B (Free Fallback)' },
+  { id: 'nvidia/nemotron-3-super-120b-a12b:free', label: 'Nemotron 3 Super (Deep, Free)' },
 ];
 
 export const IMAGE_MODEL_GUIDES: Record<string, { strengths: string, promptStyle: string }> = {

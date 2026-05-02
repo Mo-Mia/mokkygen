@@ -54,6 +54,30 @@ export function TechnicalDetails({ details }: TechnicalDetailsProps) {
               <dd>{details.type}</dd>
             </div>
           )}
+          {details.requestedModalities && (
+            <div>
+              <dt className="text-white/30">Requested modalities</dt>
+              <dd>{details.requestedModalities.join(', ')}</dd>
+            </div>
+          )}
+          {details.fallbackModalities && (
+            <div>
+              <dt className="text-white/30">Fallback modalities</dt>
+              <dd>{details.fallbackModalities.join(', ')}</dd>
+            </div>
+          )}
+          {details.fallbackUsed !== undefined && (
+            <div>
+              <dt className="text-white/30">Fallback used</dt>
+              <dd>{details.fallbackUsed ? 'yes' : 'no'}</dd>
+            </div>
+          )}
+          {details.originalErrorMessage && (
+            <div>
+              <dt className="text-white/30">Original error</dt>
+              <dd className="break-words">{details.originalErrorMessage}</dd>
+            </div>
+          )}
         </dl>
       )}
     </div>

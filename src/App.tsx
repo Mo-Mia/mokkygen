@@ -486,6 +486,7 @@ export default function App() {
                                 <div className="mt-1 flex items-center gap-2 text-[10px] uppercase tracking-widest text-white/35">
                                   <span>{entry.model.isFree ? 'Free' : 'Paid'}</span>
                                   <span>{entry.status}</span>
+                                  {entry.result?.modalityFallbackUsed && <span className="text-amber-300">Used image-only mode</span>}
                                 </div>
                               </div>
                               <button onClick={() => setModel(entry.model.id)} className="shrink-0 rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] uppercase text-white/55 hover:bg-white/10">
@@ -508,8 +509,8 @@ export default function App() {
                               )}
                               {entry.result && !entry.result.imageUrl && <pre className="max-h-full overflow-auto whitespace-pre-wrap text-xs text-white/55">{entry.result.content}</pre>}
                             </div>
-                            {entry.result && (
-                              <div className="flex items-center justify-between gap-2 border-t border-white/5 p-3 text-[10px] uppercase tracking-widest text-white/40">
+                          {entry.result && (
+                            <div className="flex items-center justify-between gap-2 border-t border-white/5 p-3 text-[10px] uppercase tracking-widest text-white/40">
                                 <span className="flex items-center gap-1">
                                   <Clock className="h-3 w-3" />
                                   {formatDuration(entry.result.durationMs)}

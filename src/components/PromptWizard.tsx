@@ -72,7 +72,7 @@ export function PromptWizard({
         primaryError = err;
         // Fallback logic
         console.warn('Primary wizard failed, trying fallback:', err);
-        const fallbackModel = WIZARD_MODELS[1].id;
+        const fallbackModel = 'openai/gpt-oss-120b:free';
         
         if (wizardModel === fallbackModel) throw err; // Don't fallback to same model
         
