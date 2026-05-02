@@ -16,10 +16,21 @@ import { ModelSelector } from './components/ModelSelector';
 import { PromptWizard } from './components/PromptWizard';
 import { ImageViewer, type ViewableImage } from './components/ImageViewer';
 import { TechnicalDetails } from './components/TechnicalDetails';
-import { migrateJson, writeJson } from './lib/storage';
+import { AdvancedControls } from './components/AdvancedControls';
+import { migrateJson, readJson, writeJson } from './lib/storage';
+import {
+  clampSettingsForCapabilities,
+  fromPersistedSettings,
+  getCommonCapabilities,
+  getImageModelCapabilities,
+  toPersistedSettings,
+  type ImageGenerationSettings,
+  type PersistedImageGenerationSettings,
+} from './lib/modelCapabilities';
 
 const HISTORY_KEY = 'mokkygen_gen_history';
 const API_KEY = 'mokkygen_api_key';
+const SETTINGS_KEY = 'mokkygen_generation_settings';
 const MAX_HISTORY = 50;
 
 interface GenHistory extends ORGenerationResult {
@@ -95,6 +106,7 @@ export default function App() {
   const [generationMode, setGenerationMode] = useState<GenerationMode>('single');
   const [compareModelIds, setCompareModelIds] = useState<string[]>([MODELS[0].id, MODELS[1].id]);
   const [compareResults, setCompareResults] = useState<CompareResult[]>([]);
+  const [generationSettings, setGenerationSettings] = useState<ImageGenerationSettings>(() => fromPersistedSettings(readJson<PersistedImageGenerationSettings | undefined>(SETTINGS_KEY, undefined)));
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +116,11 @@ export default function App() {
   const [viewerItem, setViewerItem] = useState<ViewableImage | null>(null);
 
   const selectedModel = getModel(model);
+  const activeCapabilities = useMemo(
+    () => (generationMode === 'compare' ? getCommonCapabilities(compareModelIds) : getImageModelCapabilities(model)),
+    [compareModelIds, generationMode, model]
+  );
+  const clampedGenerationSettings = useMemo(() => clampSettingsForCapabilities(generationSettings, activeCapabilities), [activeCapabilities, generationSettings]);
   const creditDisplay = useMemo(() => (keyInfo ? computeCreditDisplay(keyInfo) : null), [keyInfo]);
   const hasPaidCompareModels = compareModelIds.some((id) => !getModel(id).isFree);
   const compareLowBalance = creditDisplay?.remaining !== null && creditDisplay?.remaining !== undefined && creditDisplay.remaining < 1;
@@ -149,6 +166,17 @@ export default function App() {
   useEffect(() => {
     writeJson(HISTORY_KEY, genHistory.slice(0, MAX_HISTORY));
   }, [genHistory]);
+
+  useEffect(() => {
+    writeJson(SETTINGS_KEY, toPersistedSettings(clampedGenerationSettings));
+  }, [clampedGenerationSettings]);
+
+  useEffect(() => {
+    const clamped = clampSettingsForCapabilities(generationSettings, activeCapabilities);
+    if (JSON.stringify(clamped) !== JSON.stringify(generationSettings)) {
+      setGenerationSettings(clamped);
+    }
+  }, [activeCapabilities, generationSettings]);
 
   const updateGenerationMetadata = async (generationId: string) => {
     try {
@@ -214,7 +242,9 @@ export default function App() {
       const result = await generateImage(apiKey, {
         model,
         prompt,
-        modalities: selectedModel.preferredModalities,
+        modalities: activeCapabilities.preferredModalities,
+        settings: clampedGenerationSettings,
+        capabilities: activeCapabilities,
       });
       const newGen = historyFromResult(result, prompt);
       setHistoryCapped((previous) => [newGen, ...previous]);
@@ -254,7 +284,9 @@ export default function App() {
           const result = await generateImage(apiKey, {
             model: item.id,
             prompt,
-            modalities: item.preferredModalities,
+            modalities: getImageModelCapabilities(item.id).preferredModalities,
+            settings: clampedGenerationSettings,
+            capabilities: getImageModelCapabilities(item.id),
           });
           const historyItem = historyFromResult(result, prompt);
           setCompareResults((previous) => previous.map((entry) => (entry.model.id === item.id ? { model: item, status: 'success', result: historyItem } : entry)));
@@ -458,6 +490,15 @@ export default function App() {
 
               <PromptWizard apiKey={apiKey} isKeyValid={isKeyValid} currentPrompt={prompt} selectedImageModel={model} onReplacePrompt={setPrompt} onAppendPrompt={appendToPrompt} />
 
+              <AdvancedControls
+                selectedModelIds={generationMode === 'compare' ? compareModelIds : [model]}
+                mode={generationMode}
+                settings={clampedGenerationSettings}
+                onChange={setGenerationSettings}
+                capabilities={activeCapabilities}
+                disabled={isGenerating}
+              />
+
               <div className="relative min-h-[300px] flex-1 overflow-hidden rounded-xl border border-white/5 bg-[#080808]">
                 <AnimatePresence>
                   {error && (
@@ -487,6 +528,7 @@ export default function App() {
                                   <span>{entry.model.isFree ? 'Free' : 'Paid'}</span>
                                   <span>{entry.status}</span>
                                   {entry.result?.modalityFallbackUsed && <span className="text-amber-300">Used image-only mode</span>}
+                                  {entry.result?.advancedSettingsFallbackUsed && <span className="text-amber-300">Advanced controls simplified</span>}
                                 </div>
                               </div>
                               <button onClick={() => setModel(entry.model.id)} className="shrink-0 rounded border border-white/10 bg-white/5 px-2 py-1 text-[10px] uppercase text-white/55 hover:bg-white/10">
@@ -605,6 +647,7 @@ export default function App() {
                           {gen.modelName}
                         </span>
                         <div className="flex shrink-0 items-center gap-2 pl-2">
+                          {gen.advancedSettingsFallbackUsed && <span className="text-amber-300">Simplified</span>}
                           {gen.durationMs !== undefined && <span>{formatDuration(gen.durationMs)}</span>}
                           {gen.cost !== undefined && <span className="font-mono font-semibold text-emerald-400">${gen.cost.toFixed(4)}</span>}
                         </div>

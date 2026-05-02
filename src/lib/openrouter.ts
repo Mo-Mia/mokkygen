@@ -1,4 +1,11 @@
 import { IMAGE_MODEL_GUIDES } from './promptWizard';
+import {
+  clampSettingsForCapabilities,
+  getImageModelCapabilities,
+  type FontInput,
+  type ImageGenerationSettings,
+  type ImageModelCapabilities,
+} from './modelCapabilities';
 
 const OR_BASE = 'https://openrouter.ai/api/v1';
 const DEFAULT_MODALITIES: OpenRouterModality[] = ['image', 'text'];
@@ -13,9 +20,16 @@ export interface OpenRouterErrorDetails {
   code?: string | number;
   type?: string;
   requestedModalities?: OpenRouterModality[];
+  finalModalities?: OpenRouterModality[];
   fallbackModalities?: OpenRouterModality[];
   fallbackUsed?: boolean;
   originalErrorMessage?: string;
+  finalErrorMessage?: string;
+  requestedImageConfig?: Record<string, unknown>;
+  finalImageConfig?: Record<string, unknown>;
+  referenceImageCount?: number;
+  droppedSettings?: string[];
+  advancedSettingsFallbackUsed?: boolean;
 }
 
 export class OpenRouterApiError extends Error {
@@ -64,6 +78,8 @@ export interface ORGenerationParams {
   model: string;
   prompt: string;
   modalities?: OpenRouterModality[];
+  settings?: ImageGenerationSettings;
+  capabilities?: ImageModelCapabilities;
 }
 
 export interface ORGenerationResult {
@@ -79,6 +95,8 @@ export interface ORGenerationResult {
   requestedModalities?: OpenRouterModality[];
   fallbackModalities?: OpenRouterModality[];
   modalityFallbackUsed?: boolean;
+  advancedSettingsFallbackUsed?: boolean;
+  droppedSettings?: string[];
 }
 
 export interface ORGenerationMetadata {
@@ -227,14 +245,113 @@ export function extractImageUrl(message: any, content: string): string | undefin
   return undefined;
 }
 
+function cleanFontInputs(fontInputs: FontInput[]): Array<{ font_url: string; text: string }> {
+  return fontInputs
+    .slice(0, 2)
+    .map((fontInput) => ({ font_url: fontInput.fontUrl.trim(), text: fontInput.text.trim() }))
+    .filter((fontInput) => fontInput.font_url && fontInput.text);
+}
+
+function buildImageConfig(settings: ImageGenerationSettings, capabilities: ImageModelCapabilities): Record<string, unknown> | undefined {
+  if (!capabilities.supportsImageConfig) return undefined;
+
+  const imageConfig: Record<string, unknown> = {};
+  if (settings.aspectRatio && capabilities.supportedAspectRatios.includes(settings.aspectRatio)) {
+    imageConfig.aspect_ratio = settings.aspectRatio;
+  }
+  if (settings.imageSize && capabilities.supportedImageSizes.includes(settings.imageSize)) {
+    imageConfig.image_size = settings.imageSize;
+  }
+  if (capabilities.supportsFontInputs) {
+    const fontInputs = cleanFontInputs(settings.fontInputs);
+    if (fontInputs.length > 0) imageConfig.font_inputs = fontInputs;
+  }
+
+  return Object.keys(imageConfig).length > 0 ? imageConfig : undefined;
+}
+
+function buildMessages(prompt: string, settings: ImageGenerationSettings, capabilities: ImageModelCapabilities) {
+  const referenceImages = capabilities.supportsReferenceImages ? settings.referenceImages.slice(0, capabilities.maxReferenceImages) : [];
+  if (referenceImages.length === 0) {
+    return [{ role: 'user', content: prompt }];
+  }
+
+  return [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        ...referenceImages.map((image) => ({
+          type: 'image_url',
+          image_url: { url: image.dataUrl },
+        })),
+      ],
+    },
+  ];
+}
+
+function buildAdvancedPayload(params: ORGenerationParams, capabilities: ImageModelCapabilities, settings: ImageGenerationSettings, omit: string[] = []) {
+  const requestedSettings = clampSettingsForCapabilities(settings, capabilities);
+  const effectiveSettings: ImageGenerationSettings = {
+    ...requestedSettings,
+    aspectRatio: omit.includes('aspect_ratio') || omit.includes('image_config') ? undefined : requestedSettings.aspectRatio,
+    imageSize: omit.includes('image_size') || omit.includes('image_config') ? undefined : requestedSettings.imageSize,
+    referenceImages: omit.includes('reference_images') ? [] : requestedSettings.referenceImages,
+    fontInputs: omit.includes('font_inputs') || omit.includes('image_config') ? [] : requestedSettings.fontInputs,
+    seed: omit.includes('seed') ? null : requestedSettings.seed,
+    temperature: omit.includes('temperature') ? null : requestedSettings.temperature,
+  };
+  const imageConfig = omit.includes('image_config') ? undefined : buildImageConfig(effectiveSettings, capabilities);
+  const payload: Record<string, unknown> = {
+    model: params.model,
+    messages: buildMessages(params.prompt, effectiveSettings, capabilities),
+  };
+
+  if (imageConfig) payload.image_config = imageConfig;
+  if (capabilities.supportsSeed && effectiveSettings.seed !== null && effectiveSettings.seed !== undefined) payload.seed = effectiveSettings.seed;
+  if (capabilities.supportsTemperature && effectiveSettings.temperature !== null && effectiveSettings.temperature !== undefined) payload.temperature = effectiveSettings.temperature;
+
+  return {
+    payload,
+    imageConfig,
+    referenceImageCount: capabilities.supportsReferenceImages ? effectiveSettings.referenceImages.length : 0,
+  };
+}
+
+function isAdvancedSettingsError(error: unknown): boolean {
+  const message = error instanceof OpenRouterApiError ? error.details.message : error instanceof Error ? error.message : String(error);
+  return /image_config|aspect_ratio|image_size|font_inputs|seed|temperature|image_url|image input|reference/i.test(message);
+}
+
+function advancedFallbackForError(error: unknown): string[] {
+  const message = error instanceof OpenRouterApiError ? error.details.message : error instanceof Error ? error.message : String(error);
+  if (/image_size|resolution|size/i.test(message)) return ['image_size'];
+  if (/aspect_ratio|aspect ratio|ratio/i.test(message)) return ['aspect_ratio'];
+  if (/font_inputs|font/i.test(message)) return ['font_inputs'];
+  if (/image_url|image input|reference/i.test(message)) return ['reference_images'];
+  if (/image_config/i.test(message)) return ['image_config'];
+  if (/seed/i.test(message)) return ['seed'];
+  if (/temperature/i.test(message)) return ['temperature'];
+  return ['image_config'];
+}
+
 async function requestImageCompletion(
   apiKey: string,
   endpoint: string,
   params: ORGenerationParams,
   modalities: OpenRouterModality[],
   startedAt: number,
-  fallbackInfo?: { requestedModalities: OpenRouterModality[]; fallbackModalities: OpenRouterModality[] }
+  capabilities: ImageModelCapabilities,
+  settings: ImageGenerationSettings,
+  fallbackInfo?: {
+    requestedModalities?: OpenRouterModality[];
+    fallbackModalities?: OpenRouterModality[];
+    droppedSettings?: string[];
+    advancedSettingsFallbackUsed?: boolean;
+    originalErrorMessage?: string;
+  }
 ): Promise<ORGenerationResult> {
+  const built = buildAdvancedPayload(params, capabilities, settings, fallbackInfo?.droppedSettings ?? []);
   const resp = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -244,8 +361,7 @@ async function requestImageCompletion(
       'X-Title': 'MokkyGen',
     },
     body: JSON.stringify({
-      model: params.model,
-      messages: [{ role: 'user', content: params.prompt }],
+      ...built.payload,
       modalities,
       stream: false,
     }),
@@ -254,8 +370,15 @@ async function requestImageCompletion(
   if (!resp.ok) {
     throw await parseErrorResponse(resp, endpoint, params.model, {
       requestedModalities: fallbackInfo?.requestedModalities ?? modalities,
+      finalModalities: modalities,
       fallbackModalities: fallbackInfo?.fallbackModalities,
       fallbackUsed: Boolean(fallbackInfo),
+      requestedImageConfig: buildImageConfig(clampSettingsForCapabilities(settings, capabilities), capabilities),
+      finalImageConfig: built.imageConfig,
+      referenceImageCount: built.referenceImageCount,
+      droppedSettings: fallbackInfo?.droppedSettings,
+      advancedSettingsFallbackUsed: fallbackInfo?.advancedSettingsFallbackUsed ?? false,
+      originalErrorMessage: fallbackInfo?.originalErrorMessage,
     });
   }
 
@@ -273,35 +396,83 @@ async function requestImageCompletion(
     createdAt: Date.now(),
     requestedModalities: fallbackInfo?.requestedModalities ?? modalities,
     fallbackModalities: fallbackInfo?.fallbackModalities,
-    modalityFallbackUsed: Boolean(fallbackInfo),
+    modalityFallbackUsed: Boolean(fallbackInfo?.fallbackModalities),
+    advancedSettingsFallbackUsed: fallbackInfo?.advancedSettingsFallbackUsed,
+    droppedSettings: fallbackInfo?.droppedSettings,
   };
 }
 
 export async function generateImage(apiKey: string, params: ORGenerationParams): Promise<ORGenerationResult> {
   const endpoint = `${OR_BASE}/chat/completions`;
   const startedAt = performance.now();
-  const requestedModalities = params.modalities ?? DEFAULT_MODALITIES;
+  const capabilities = params.capabilities ?? getImageModelCapabilities(params.model);
+  const settings = clampSettingsForCapabilities(
+    params.settings ?? {
+      aspectRatio: undefined,
+      imageSize: undefined,
+      seed: null,
+      temperature: null,
+      referenceImages: [],
+      fontInputs: [],
+    },
+    capabilities
+  );
+  const requestedModalities = params.modalities ?? capabilities.preferredModalities ?? DEFAULT_MODALITIES;
 
   try {
-    return await requestImageCompletion(apiKey, endpoint, params, requestedModalities, startedAt);
+    return await requestImageCompletion(apiKey, endpoint, params, requestedModalities, startedAt, capabilities, settings);
   } catch (error) {
     if (!isModalityMismatchError(error) || requestedModalities.length === 1 && requestedModalities[0] === 'image') {
       if (error instanceof OpenRouterApiError) {
         error.details.requestedModalities = requestedModalities;
+        error.details.finalModalities = requestedModalities;
         error.details.fallbackUsed = false;
       }
-      throw error;
+      if (!isAdvancedSettingsError(error)) throw error;
+
+      const droppedSettings = advancedFallbackForError(error);
+      try {
+        return await requestImageCompletion(apiKey, endpoint, params, requestedModalities, startedAt, capabilities, settings, {
+          requestedModalities,
+          droppedSettings,
+          advancedSettingsFallbackUsed: true,
+          originalErrorMessage: error instanceof OpenRouterApiError ? error.details.message : error instanceof Error ? error.message : String(error),
+        });
+      } catch (fallbackError) {
+        if (fallbackError instanceof OpenRouterApiError) {
+          fallbackError.details.finalErrorMessage = fallbackError.details.message;
+        }
+        throw fallbackError;
+      }
     }
 
     const fallbackModalities: OpenRouterModality[] = ['image'];
     try {
-      return await requestImageCompletion(apiKey, endpoint, params, fallbackModalities, startedAt, {
+      return await requestImageCompletion(apiKey, endpoint, params, fallbackModalities, startedAt, capabilities, settings, {
         requestedModalities,
         fallbackModalities,
       });
     } catch (fallbackError) {
+      if (isAdvancedSettingsError(fallbackError)) {
+        const droppedSettings = advancedFallbackForError(fallbackError);
+        try {
+          return await requestImageCompletion(apiKey, endpoint, params, fallbackModalities, startedAt, capabilities, settings, {
+            requestedModalities,
+            fallbackModalities,
+            droppedSettings,
+            advancedSettingsFallbackUsed: true,
+            originalErrorMessage: fallbackError instanceof OpenRouterApiError ? fallbackError.details.message : fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+          });
+        } catch (advancedFallbackError) {
+          if (advancedFallbackError instanceof OpenRouterApiError) {
+            advancedFallbackError.details.finalErrorMessage = advancedFallbackError.details.message;
+          }
+          throw advancedFallbackError;
+        }
+      }
       if (fallbackError instanceof OpenRouterApiError) {
         fallbackError.details.requestedModalities = requestedModalities;
+        fallbackError.details.finalModalities = fallbackModalities;
         fallbackError.details.fallbackModalities = fallbackModalities;
         fallbackError.details.fallbackUsed = true;
         fallbackError.details.originalErrorMessage = error instanceof OpenRouterApiError ? error.details.message : error instanceof Error ? error.message : String(error);
@@ -334,6 +505,19 @@ export async function getGenerationMetadata(apiKey: string, generationId: string
     generationTime: generation.generation_time,
     createdAt: Number.isFinite(createdAt) ? createdAt : undefined,
   };
+}
+
+export async function fetchOpenRouterImageModels(apiKey?: string): Promise<unknown> {
+  const endpoint = `${OR_BASE}/models?output_modalities=image`;
+  const resp = await fetch(endpoint, {
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+  });
+
+  if (!resp.ok) {
+    throw await parseErrorResponse(resp, endpoint);
+  }
+
+  return resp.json();
 }
 
 function wizardInstruction(mode: WizardMode): string {

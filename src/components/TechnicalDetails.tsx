@@ -60,6 +60,12 @@ export function TechnicalDetails({ details }: TechnicalDetailsProps) {
               <dd>{details.requestedModalities.join(', ')}</dd>
             </div>
           )}
+          {details.finalModalities && (
+            <div>
+              <dt className="text-white/30">Final modalities</dt>
+              <dd>{details.finalModalities.join(', ')}</dd>
+            </div>
+          )}
           {details.fallbackModalities && (
             <div>
               <dt className="text-white/30">Fallback modalities</dt>
@@ -76,6 +82,42 @@ export function TechnicalDetails({ details }: TechnicalDetailsProps) {
             <div>
               <dt className="text-white/30">Original error</dt>
               <dd className="break-words">{details.originalErrorMessage}</dd>
+            </div>
+          )}
+          {details.finalErrorMessage && (
+            <div>
+              <dt className="text-white/30">Final error</dt>
+              <dd className="break-words">{details.finalErrorMessage}</dd>
+            </div>
+          )}
+          {details.requestedImageConfig && (
+            <div>
+              <dt className="text-white/30">Requested image_config</dt>
+              <dd className="break-words">{JSON.stringify(details.requestedImageConfig)}</dd>
+            </div>
+          )}
+          {details.finalImageConfig && (
+            <div>
+              <dt className="text-white/30">Final image_config</dt>
+              <dd className="break-words">{JSON.stringify(details.finalImageConfig)}</dd>
+            </div>
+          )}
+          {details.referenceImageCount !== undefined && (
+            <div>
+              <dt className="text-white/30">Reference images</dt>
+              <dd>{details.referenceImageCount}</dd>
+            </div>
+          )}
+          {details.droppedSettings && details.droppedSettings.length > 0 && (
+            <div>
+              <dt className="text-white/30">Dropped settings</dt>
+              <dd>{details.droppedSettings.join(', ')}</dd>
+            </div>
+          )}
+          {details.advancedSettingsFallbackUsed !== undefined && (
+            <div>
+              <dt className="text-white/30">Advanced fallback used</dt>
+              <dd>{details.advancedSettingsFallbackUsed ? 'yes' : 'no'}</dd>
             </div>
           )}
         </dl>
